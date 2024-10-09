@@ -1,0 +1,706 @@
+---
+title: "CS01: Biomarkers of Recent Use"
+author: "Xuan Jiang, Jiawei Lyu, Amy Tan"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: yes
+    fig_width: 13
+---
+
+## Introduction
+
+```{r setup, include=FALSE}
+# control global Rmd chunk settings
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+In our case study, we aim to analyze the best possible biomarker of recent marijuana usage. In America, almost two-thirds of US trauma center admissions are the result of motor vehicle accidents (MVAs); 60% of these MVAs have drivers who test positive for drugs, the most commonly detected being alcohol and cannabis.[^1] Cannabis use has increased in America by 25% (2002 to 2015)[^2] despite being federally illegal as it is not only being decriminalized in many states, but also becoming more readily available for both medical and recreational use.[^3] Likewise, THC detection, the substance primarily responsible for marijuana’s effects on one’s mental state[^4], has increased in drivers, raising a public health concern for safety on the roads as research suggests that impairment caused by usage increases the risk of MVAs.[^1]
+
+Consequently, some states have enacted cutoffs called per se laws that are presumptive of impairment if one has THC detected at or above this cutoff, similar to Blood Alcohol Concentration (BAC) Limits.[^5] This ranges from zero tolerance to 1 to 5 mg/mmL of THC in whole blood.[^5] However, marijuana detection to determine whether an individual is impaired is nuanced and complex - THC concentration differs in individuals due to their frequency of use, how they choose to ingest the drug, and their smoking topography (referring to their time it takes to smoke and the number of puffs taken). Additionally, the individual subjective high can persist for several hours with great variability between individuals. THC can also remain detectable in frequent users longer than occasional users; in fact, THC and other markers can be detected in blood for months after use, making it difficult to use it as a marker of recent use or impairment.[^6] As a result, studies have suggested that THC concentrations have a poor correlation with one’s magnitude of driving impairment, posing a significant challenge to the cutoffs in these laws[^7] - while drivers with impairment from marijuana use should be removed from the road, drivers who are not should not be unfairly punished. Thus, exploring data further may help inform legislation in enacting fair and reasonable cutoffs to ensure safety on the road. In our case study, we are analyzing various compounds (not just THC) in various matrices (whole blood, breath, and oral fluid) at differing cutoffs to determine what the best biomarker of recent use, defined as within three hours, is.
+
+## Question
+1. Which compound, in which matrix, and at what cutoff is the best biomarker of recent use?
+2. If we then use the top two biomarkers of recent use, can we get better results, in terms of sensitivity and specificity, if they are used for machine learning?
+
+## The Data
+The datasets we will use for our case study come from Hoffman et al.’s 2021 study involving occasional versus frequent marijuana smokers.[^8] We are provided data from the three different matrices (blood, oral fluid, and breath) to work with.
+
+### Load packages
+We began by loading in all the R packages that we were going to use for the analysis.
+
+```{r load-packages, message=FALSE}
+# for wrangling
+library(tidyverse)
+library(tidymodels)
+library(tidyr)
+library(janitor)
+# for EDA
+library(purrr)
+library(rstatix)
+library(cowplot)
+# for extending analysis
+library(parsnip) # need to install
+library(class)  # don't need to install
+```
+
+### Data Import
+
+We also loaded in our data from the provided data folder, and imported large functions we'll be using in our analysis.
+
+```{r}
+raw_blood <- read.csv("data/Blood.csv")
+raw_breath <- read.csv("data/Breath.csv")
+raw_OF <- read.csv("data/OF.csv")
+```
+```{r}
+source("src/cs01_functions.R")
+```
+
+### Data Wrangling
+
+Once our data is imported, we then wrangle our data to be able to analyze it.
+
+The first thing we did was change our values in the Treatment columns in our whole blood dataset to be more informative at a glance, adding on whether the dose was low or high for the participant. For the same Treatment column, we also order them in increasing dosage, from placebo as our baseline, to low, to high. 
+
+```{r}
+# Make values in Treatment column more informative and relevel them in increasing order
+WB <- raw_blood |> 
+  mutate(
+    Treatment = fct_recode(Treatment, 
+                                "5.9% THC (low dose)" = "5.90%",
+                                "13.4% THC (high dose)" = "13.40%"),
+         Treatment = fct_relevel(Treatment, "Placebo", "5.9% THC (low dose)"))
+```
+
+Afterwards, we clean the names in the whole blood data frame to ensure that all names are unique, and only consist of _, characters, numbers, and letters. Following this, we renamed several of the compound columns in order to be more consistent with general usage.
+
+```{r}
+# Clean names in WB data frame and rename compound columns as more commonly used
+WB <- WB |> 
+  janitor::clean_names() |>
+  rename(thcoh = x11_oh_thc,
+         thccooh = thc_cooh,
+         thccooh_gluc = thc_cooh_gluc,
+         thcv = thc_v)
+```
+
+We do this same exact process with the oral fluid and breath data, with the addition of also changing our values in the Group column. We changed the language from experienced to occasional and frequent.
+
+```{r}
+# Oral Fluid data
+OF <- raw_OF |>
+  mutate(Treatment = fct_recode(Treatment, 
+                                "5.9% THC (low dose)" = "5.90%",
+                                "13.4% THC (high dose)" = "13.40%"),
+         Treatment = fct_relevel(Treatment, "Placebo", "5.9% THC (low dose)"),
+         Group = fct_recode(Group, 
+                            "Occasional user" = "Not experienced user",
+                            "Frequent user" = "Experienced user" )) |>  
+  janitor::clean_names() |>
+  rename(thcoh = x11_oh_thc,
+         thcv = thc_v)
+
+#Breath data 
+BR <- raw_breath |> 
+  mutate(Treatment = fct_recode(Treatment, 
+                                "5.9% THC (low dose)" = "5.90%",
+                                "13.4% THC (high dose)" = "13.40%"),
+         Treatment = fct_relevel(Treatment, "Placebo", "5.9% THC (low dose)"),
+         Group = fct_recode(Group, 
+                            "Occasional user" = "Not experienced user",
+                            "Frequent user" = "Experienced user" )) |> 
+  janitor::clean_names() |> 
+  rename(thc = thc_pg_pad)
+```
+
+Since the three data frames have different compounds they provide information about, it's helpful to separate out the specific compounds in this format as we're trying to identify one that is the best biomarker. So, we stored the compounds in a list based off the matrix they came from so we can use them in our functions and analysis later on.
+
+```{r}
+# whole blood compounds 
+compounds_WB <-  as.list(colnames(Filter(function(x) !all(is.na(x)), WB[6:13])))
+
+# breath compounds 
+compounds_BR <-  as.list(colnames(Filter(function(x) !all(is.na(x)), BR[6])))
+
+# oral fluid compounds
+compounds_OF <-  as.list(colnames(Filter(function(x) !all(is.na(x)), OF[6:12])))
+```
+
+Additionally, we created data frames that defined timepoints or a window that an observation could fall in (with defined start and stop times) to use in our following function.
+
+```{r}
+# time points for whole blood
+timepoints_WB <- tibble(start = c(-400, 0, 30, 70, 100, 180, 210, 240, 270, 300), 
+                       stop = c(0, 30, 70, 100, 180, 210, 240, 270, 300,
+                                max(WB$time_from_start, na.rm = TRUE)), 
+                       timepoint = c("pre-smoking","0-30 min","31-70 min",
+                                     "71-100 min","101-180 min","181-210 min",
+                                     "211-240 min","241-270 min",
+                                     "271-300 min", "301+ min") )
+
+#time points for breath
+timepoints_BR <- tibble(start = c(-400, 0, 40, 90, 180, 210, 240, 270), 
+                       stop = c(0, 40, 90, 180, 210, 240, 270, 
+                                max(BR$time_from_start, na.rm = TRUE)), 
+                       timepoint = c("pre-smoking","0-40 min","41-90 min",
+                                     "91-180 min", "181-210 min", "211-240 min",
+                                     "241-270 min", "271+ min"))
+
+#time points for oral fluid
+timepoints_OF <- tibble(start = c(-400, 0, 30, 90, 180, 210, 240, 270), 
+                       stop = c(0, 30, 90, 180, 210, 240, 270, 
+                                max(OF$time_from_start, na.rm = TRUE)), 
+                       timepoint = c("pre-smoking","0-30 min","31-90 min",
+                                     "91-180 min", "181-210 min", "211-240 min",
+                                     "241-270 min", "271+ min") )
+```
+
+We then created a function, assign_timepoint, to take a time value compare it to the various start and stop times from our previous step and assign it the corresponding timepoint value, unless the value is empty. This way, when we then apply our function to our three data frames, storing the timepoints in a new column (timepoint_use), we have more meaningful and informative timepoints than our previous T1, T2A, etc.
+
+```{r}
+# Function assign_timepoint to assign the respective, meaningful timepoint
+assign_timepoint <- function(x, timepoints){
+  if(!is.na(x)){ 
+    timepoints$timepoint[x > timepoints$start & x <= timepoints$stop]
+  }else{
+    NA}}
+```
+
+```{r}
+# Applying the assign_timepoint function to the whole blood data frame
+ WB <- WB |> 
+  mutate(timepoint_use = map_chr(time_from_start, 
+                                 assign_timepoint, 
+                                 timepoints=timepoints_WB),
+         timepoint_use = fct_relevel(timepoint_use, timepoints_WB$timepoint))
+
+# Applying the assign_timepoint function to the oral fluid data frame
+OF <- OF |> 
+  mutate(timepoint_use = map_chr(time_from_start, 
+                                 assign_timepoint, 
+                                 timepoints=timepoints_OF),
+         timepoint_use = fct_relevel(timepoint_use, timepoints_OF$timepoint))
+
+# Applying the assign_timepoint function to the breath data frame
+BR <- BR |> 
+  mutate(timepoint_use = map_chr(time_from_start, 
+                                 assign_timepoint, 
+                                 timepoints=timepoints_BR),
+         timepoint_use = fct_relevel(timepoint_use, timepoints_BR$timepoint))
+
+```
+
+We make another function, drop_dups, that takes a dataset, filters it so that we don't have any empty values in the timepoint_use column that we just created. We check the participants' unique ids to ensure that we don't have any participants occurring multiple times in the same timepoint and apply this function to all three of our datasets. 
+```{r}
+# Function drop_dups ensures that there aren't any empty values in a timepoint and that each participant is only measured once in each timepoint.
+ drop_dups <- function(dataset){
+  out <- dataset |> 
+    filter(!is.na(timepoint_use)) |> 
+    group_by(timepoint_use) |> 
+    distinct(id, .keep_all = TRUE) |> 
+    ungroup()
+  return(out)
+} 
+```
+
+```{r}
+# Applying drop_dups to the whole blood data set
+WB_dups <- drop_dups(WB)
+
+# Applying drop_dups to the oral fluid data set
+OF_dups <- drop_dups(OF)
+
+# Applying drop_dups to the breath data set
+BR_dups <- drop_dups(BR)
+```
+
+Lastly, we saved all our wrangled and cleaned files as RData for easy use.
+```{r}
+save(compounds_WB, compounds_BR, compounds_OF, file="data/compounds.RData")
+save(timepoints_WB, timepoints_BR, timepoints_OF, file="data/timepoints.RData")
+save(WB, BR, OF, WB_dups, BR_dups, OF_dups, file="data/data_clean.RData")
+```
+
+## Analysis
+
+Since this question asks about best biomarker for recent use, we will only consider data less than 180 minutes and the rest will be filtered out. Also, we need to modify the timepoints datasets a little bit.
+
+```{r}
+# simple function to get desire time range
+get_recent <- function(dataset) {
+  out <- dataset |>
+    filter(time_from_start <= 180)
+  return(out)
+}
+```
+
+```{r}
+# get desire datasets
+WB_recent <- get_recent(WB_dups)
+OF_recent <- get_recent(OF_dups)
+BR_recent <- get_recent(BR_dups)
+```
+
+```{r}
+# modify timepoints
+timepoints_WB_recent <- tibble(start = c(-400, 0, 30, 70, 100), 
+                       stop = c(0, 30, 70, 100, 180), 
+                       timepoint = c("pre-smoking", "0-30 min","31-70 min",
+                                     "71-100 min","101-180 min") )
+timepoints_BR_recent <- tibble(start = c(-400, 0, 40, 90), 
+                       stop = c(0, 40, 90, 180), 
+                       timepoint = c("pre-smoking", "0-40 min","41-90 min",
+                                     "91-180 min"))
+timepoints_OF_recent <- tibble(start = c(-400, 0, 30, 90), 
+                       stop = c(0, 30, 90, 180), 
+                       timepoint = c("pre-smoking", "0-30 min","31-90 min",
+                                     "91-180 min") )
+```
+### Exploratory Data Analysis
+
+Before selecting the optimal biomarker from a range of compounds, it is essential to graphically represent the concentrations of each compound in the whole blood, oral fluid, and breath of participants over a specific time period. The compound levels from -100 minutes to 0 minutes, serving as a baseline. This time frame reflects the concentrations in the blood, oral fluid, and breath of participants prior to their exposure to a cigarette. The compound levels from 0 minutes to 180 minutes reflects the concentrations in the blood, oral fluid, and breath of participants after receiving the cigarette.
+
+1. WB
+```{r}
+scatter_wb <- map(compounds_WB, ~ compound_scatterplot_group( 
+    dataset=WB_recent, 
+    compound=.x, 
+    timepoints=timepoints_WB_recent))
+```
+
+
+The observation shows that most of the compounds in whole blood (WB), with the exception of those in the control group, exhibit high concentrations at the onset of smoking, followed by a gradual decline. This pattern is logical, as it reflects the body's metabolic processes actively breaking down these compounds. However, in our analysis, we decided to exclude four specific compounds: CBD, THCCOOH, THCCOOH-gluc, and THCV. This decision was based on the comparative analysis of compound degradation in whole blood. Notably, the levels of these compounds in the blood after administration of either the placebo or THC showed negligible changes when compared to the levels observed in the absence of any placebo or THC exposure. Consequently, the lack of significant variation in these compound levels renders them unsuitable for making reliable predictions or assessments in the context of our study. This exclusion helps in focusing on those compounds whose levels are more evidently affected by the introduction of THC, thereby providing a clearer understanding of the metabolic impact of smoking.
+
+2. OF
+```{r}
+scatter_of <- map(compounds_OF, ~ compound_scatterplot_group( 
+    dataset=OF_recent, 
+    compound=.x, 
+    timepoints=timepoints_OF_recent))
+```
+
+Again, we have decided to exclude THCOH from the list of potential biomarkers, because the concentration of THCOH in the oral fluid remained relatively unchanged over the monitored time frame. 
+
+3. BR
+```{r}
+scatter_br <- map(compounds_BR, ~ compound_scatterplot_group( 
+    dataset=BR_recent, 
+    compound=.x, 
+    timepoints=timepoints_BR_recent))
+```
+
+It's important to recognize that there are some compounds, similar to the THC observed in the BR study, whose levels significantly decrease to near zero within 40 minutes after exposure. In the context of our study, where the time range for monitoring extends to 180 minutes, these compounds technically do not qualify as ideal biomarkers because of their rapid degradation rate. However, these compounds are not entirely unresponsive to smoking. They do exhibit a noticeable increase in concentrations initially, which indicates that these compounds are indeed influenced by smoking, albeit for a shorter duration than our full monitoring window.
+
+After removing compounds that show minimal change and those that degrade quickly, we need to update our datasets and compounds list to focus on candidates with more sustained responses for our 180-minute observation period in the smoking study.
+
+```{r}
+WB_filter <- WB_recent |>
+  select(-cbd, -thccooh, -thccooh_gluc, -thcv)
+compounds_WB_filter <- compounds_WB[-c(2, 5, 6, 8)]
+
+OF_filter <- OF_recent |>
+  select(-thcoh)
+compounds_OF_filter <- compounds_OF[-4]
+
+# Just to keep the formatting consistent
+BR_filter <- BR_recent
+compounds_BR_filter <- compounds_BR
+
+
+```
+
+By plotting the levels of various compounds from different matrices (whole blood, oral fluid, and breath) over time, as shown in these histograms, the distribution and frequency of compound levels within the sample population can be compared and analyzed.
+
+```{r}
+WB_long <- WB_filter |> 
+  pivot_longer(6:9) |>
+  rename("fluid"="fluid_type")
+OF_long <- OF |> pivot_longer(6:11)
+BR_long <- BR |> pivot_longer(6)
+df_full <- bind_rows(WB_long, OF_long, BR_long)
+
+df_full |>
+  mutate(group_compound=paste0(fluid,": ", name)) |>
+ggplot(aes(x=value)) + 
+  geom_histogram() + 
+  facet_wrap(~group_compound, scales="free")
+```
+The histograms depict a substantial initial concentration of compounds such as THC, CBD, and others in various matrices—blood, oral fluid, and breath—suggesting a strong initial uptake following smoking. The significant drop in the concentration of these compounds, particularly in breath (BR) and oral fluid (OF), indicates a rapid degradation rate, which could compromise their utility as long-term biomarkers over the full 180-minute window. The relatively slower decrease in concentrations of CBN, THC, and THCOH in whole blood (WB) indicates that they are degraded at a slower rate, potentially making them more reliable indicators for extended monitoring.
+
+
+Let us plot the relationship between the identified compounds and smoking frequency by comparing the levels of these compounds in frequent users and occasional users using the box plots.
+```{r}
+df_full |>
+  filter(fluid=="WB", name=="cbn" | name=="thc" | name=="thcoh") |>
+  ggplot(aes(x=group, y=value)) +
+  geom_boxplot() +
+  facet_wrap(~name, scales = "free") +
+  labs(title = "WB")
+```
+We observe that the three compounds consistently present higher values in frequent users. Frequent users may exhibit elevated levels of these compounds due to regular exposure, which could lead to a physiological adaptation or tolerance to the substances, resulting in the slower degradation.  
+
+Subsequently, we examine how these compounds fluctuate over time under various treatment conditions. 
+```{r}
+for (i in c("cbn", "thc", "thcoh")) {
+  print(
+    df_full |>                # "T4A" is removed since it only contains data of placebo group
+      filter(fluid=="WB", name==i, timepoint != "T4A") |> 
+      ggplot(aes(x=treatment, y=value)) +
+      geom_boxplot() +
+      facet_wrap(~timepoint , scales = "free") +
+      labs(title = paste("WB", i)) +
+      scale_x_discrete(labels = c("Placebo" = "Placebo", 
+                                  "5.9% THC (low dose)" = "Low Dose", 
+                                  "13.4% THC (high dose)" = "High Dose"))
+  )
+}
+
+```
+Interestingly, the low dose group exhibits higher values for the compounds compared to the high dose group, which could be counter-intuitive but might suggest a saturation effect or a differential metabolic response to THC. The placebo group shows very low compound levels, providing a clear contrast that could aid in accurately determining whether a subject has been smoking or not. Moreover, there is a marked difference between the compound levels measured before smoking (T1) and those measured after smoking (T2A-T3B). For CBN and THCOH, the absence of pre-smoking levels (both being zero) enhances our ability to distinguish between smoking and non-smoking states. THC, despite not having a zero value before smoking, shows a significant increase post-smoking, further reinforcing its potential as a biomarker.
+
+Summarizing the results from the exploratory data analysis, we have eliminated certain compounds that did not exhibit meaningful temporal changes, narrowing down the list to 11 candidates. Of these, CBN, THC, and THCOH in whole blood are emerging as strong contenders for effective biomarkers. 
+### Data Analysis
+
+(Received help from ChatGPT when writing this part of the code.)
+
+Here we calculated the Sensitivity and Specificity for all remaining compounds for a more comprehensive assessment. 
+```{r cache=TRUE}
+output_WB <- map_dfr(compounds_WB_filter, 
+                     ~sens_spec_cpd(dataset = WB_filter, cpd = all_of(.x), 
+                                    timepoints = timepoints_WB_recent)) %>% clean_gluc()
+
+output_BR <- map_dfr(compounds_BR_filter, 
+                     ~sens_spec_cpd(dataset = BR_filter,  cpd = all_of(.x),
+                                    timepoints = timepoints_BR_recent))  %>% clean_gluc()
+
+output_OF <- map_dfr(compounds_OF_filter, 
+                     ~sens_spec_cpd(dataset = OF_filter, cpd = all_of(.x),
+                                    timepoints = timepoints_OF_recent))  %>% clean_gluc()
+```
+
+The Receiver Operating Characteristic (ROC) curves were plotted to help identify the optimal cut-off value for the biomarker that maximizes sensitivity while minimizing specificity.
+```{r include=FALSE}
+ss1_a <- ss_plot(output_WB, tpts = length(unique(output_WB$time_start)), tissue = "Blood")
+ss2_a <- ss_plot(output_OF, tpts = length(unique(output_OF$time_start)), tissue = "Oral Fluid")
+ss3_a <- roc_plot(output_BR, tpts = length(unique(output_BR$time_start)), tissue = "Breath")
+```
+
+```{r}
+bottom_row <- plot_grid(ss2_a, ss3_a, labels = c('B', 'C'), label_size = 12, ncol = 2, rel_widths = c(0.66, .33))
+plot_grid(ss1_a, bottom_row, labels = c('A', ''), label_size = 12, ncol = 1)
+```
+
+The ROC curves for THC, 11-OH-THC, CBG, and CBN in blood, as well as THC in oral fluid and breath, demonstrate the highest sensitivity and specificity shortly after smoking, indicating their effectiveness as immediate biomarkers of smoking. However, the sensitivity for these compounds decreases over time, with a notable decline in detection capability as the metabolites are processed and eliminated from the body. This is particularly evident in the breath matrix, where THC's detectability significantly diminishes after the first hour. Therefore, we'll plot again, but this time keeping only the latest time period.
+
+First, filter datasets
+```{r}
+output_BR_180 <- output_BR |> filter(time_stop==180)
+output_OF_180 <- output_OF |> filter(time_stop==180)
+output_WB_180 <- output_WB |> filter(time_stop==180)
+```
+
+Then, plot again
+```{r include=FALSE}
+ss1_b <- ss_plot(output_WB_180, tpts = length(unique(output_WB$time_start)), tissue = "Blood")
+ss2_b <- ss_plot(output_OF_180, tpts = length(unique(output_OF$time_start)), tissue = "Oral Fluid")
+ss3_b <- roc_plot(output_BR_180, tpts = length(unique(output_BR$time_start)), tissue = "Breath")
+```
+
+```{r}
+bottom_row_b <- plot_grid(ss2_b, ss3_b, labels = c('B', 'C'), label_size = 12, ncol = 2, rel_widths = c(0.66, .33))
+plot_grid(ss1_b, bottom_row_b, labels = c('A', ''), label_size = 12, ncol = 1)
+```
+
+Now, the result is obvious, only two compounds keep their sensitivity high at the end: THC in WB, and CBN in OF. now, we have to calculate their optimal cutoff.
+
+First, calculate the Sensitivity and Specificity again
+```{r}
+cutoffs = c(0.5, 1, 2, 5, 10)
+WB_THC <- sens_spec_cpd(dataset = WB_filter, cpd = 'thc',
+                        timepoints = timepoints_WB_recent,
+                        splits = cutoffs) %>% clean_gluc()
+
+OF_CBN =  sens_spec_cpd(dataset = OF_filter, cpd = 'cbn',
+                        timepoints = timepoints_OF_recent,
+                        splits = cutoffs) %>% clean_gluc()
+```
+
+Then, delete rows with NA
+```{r}
+# these rows are deleted because you can't measure sensitivity before smoking, FN=TP=0
+WB_THC <- WB_THC |> filter(time_stop != 0)
+OF_CBN <- OF_CBN |> filter(time_stop != 0)
+```
+
+We conclude the best classifier by calculating the distance between (sensitivity, (1-specificity)) and (0, 1) (perfect classifier). Here, we consider sensitivity to be as important as specificity, because we don't want people who consume overdoses to escape detection, nor do we want innocent people to be misunderstood.
+```{r}
+# simple helper functions
+DIS <- function(TPR, FPR) {
+  res <- ((1 - TPR)^2 + (1 - FPR)^2)^0.5
+  return(res)
+}
+```
+
+The average sensitivity and specificity are calculated below.
+```{r}
+WB_THC <- WB_THC |>
+  group_by(detection_limit) |>
+  summarise(avg_Sensitivity = mean(Sensitivity),
+            avg_Specificity = mean(Specificity))
+
+OF_CBN <- OF_CBN |>
+  group_by(detection_limit) |>
+  summarise(avg_Sensitivity = mean(Sensitivity),
+            avg_Specificity = mean(Specificity))
+```
+
+The average distance are calculated below.
+```{r}
+WB_THC <- WB_THC |>
+  mutate(avg_distance = map2_dbl(avg_Sensitivity, avg_Specificity, DIS)) |>
+  arrange(avg_distance, desc=FALSE)
+
+OF_CBN <- OF_CBN |>
+  mutate(avg_distance = map2_dbl(avg_Sensitivity, avg_Specificity, DIS)) |>
+  arrange(avg_distance, desc=FALSE)
+
+WB_THC
+OF_CBN
+```
+Based on the table above, the average sensitivity increases as the detection limit decreases from 10.0 to 1.0, peaking at a detection limit of 0.5, suggesting that lower detection limits allow for the identification of more true positive results. Conversely, the average specificity is highest at a detection limit of 10.0, indicating that higher detection limits are better at correctly identifying true negatives, but at the cost of missing true positives.The average distance, likely referring to the Euclidean distance to the perfect point of sensitivity and specificity on the ROC curve, is lowest at a detection limit of 1.0 for OF_CBN and 2.0 for WB_THC. This implies that a detection limit of 1.0  and 2.0 strike the best balance between sensitivity and specificity, making them the optimal threshold in this study.Therefore, the optimal threshold for WB_THC is 2.0 and for OF_CBN is 1.0. Moreover, OF_CBN is the best biomarker with higher sensitivity and specificity than WB_THC.
+
+### Extending analysis
+
+(Received help from ChatGPT when writing this part of the code.)
+
+Previously, we identified the most effective biomarkers and analyzed their sensitivity and specificity. Our next objective is to explore whether a machine learning model, utilizing these compounds, can achieve enhanced sensitivity and specificity in its predictions. For this purpose, we will employ logistic regression, a model well-suited for binary classification tasks. We will categorize treatments into two groups: 0 for placebo and 1 for THC. 
+
+The first step in our analysis requires assembling a suitable dataset. This dataset should exclusively comprise the values of the identified compounds and the treatment categories, recorded within a 180-minute window. It is crucial to exclude pre-smoking data to prevent an over-representation of non-smoking observations. By refining our dataset in this manner, we aim to ensure the robustness and accuracy of our logistic regression model, enhancing its ability to discern overdose cases based on the biomarker compounds within the specified treatment groups.
+```{r}
+THC_df <- df_full |>
+  filter(fluid == "WB", name == "thc")
+CBN_df <- df_full |>
+  filter(fluid == "OF", name == "cbn")
+
+THC_CBN_df <- bind_rows(THC_df, CBN_df) |>
+  filter(time_from_start >= 0 & time_from_start <= 180)
+```
+
+```{r}
+THC_CBN_df |>
+     filter(fluid == "WB") |>
+     group_by(timepoint) |>
+     summarise(n())
+
+THC_CBN_df |>
+     filter(fluid == "OF") |>
+     group_by(timepoint) |>
+     summarise(n())
+```
+
+
+It's noted that "WB" is more frequently measured. For our analysis, we will only include data from the "T2A" and "T3A" time points, as all relevant compounds were measured concurrently at these instances. "T4A" is excluded due to its limited data, specifically only one observation of "WB", making it inadequate for reliable analysis. 
+```{r}
+THC_CBN_df <- THC_CBN_df |>
+  filter(timepoint == "T2A" | timepoint == "T3A")
+
+# short description: use pivot wider to get 2 columns. One stores WB_thc value, one stores OF_cbn
+# value. get the length of coercion, delete the rows which length are not 2. Unnest, and change the 
+# treatment to 0(placebo) and 1(low & high dose)
+logit_value <- THC_CBN_df |>
+  pivot_wider(
+    id_cols = id,
+    names_from = c(fluid, name),
+    values_from = value,
+    values_fill = NA
+  ) |>
+  mutate(WB_length = map_int(WB_thc, length),
+         OF_length = map_int(OF_cbn, length)) |>
+  filter(WB_length == 2 & OF_length == 2) |>
+  unnest(cols = c(WB_thc, OF_cbn)) |>
+  select(-WB_length, -OF_length)
+
+# get treatment
+logit_treatment <- THC_CBN_df |>
+  select(id, treatment)
+
+# finally get dataset
+logit_df <- left_join(logit_value, logit_treatment, by="id")  |>
+  distinct() |>
+  select(-id) |>
+  mutate(treatment = ifelse(treatment == "Placebo", 0, 1))
+
+# change the treatment to factor
+logit_df$treatment <- factor(logit_df$treatment)
+```
+
+After obtaining a dataset comprising 330 observations, which record the values of treatment, WB_thc, and OF_cbn, we can begin model training.
+
+First, perform a train-test split. This involves dividing our dataset into two parts: a training set and a testing set. The training set is used to train our model, allowing it to learn and understand the relationships and patterns within the data. The testing set, on the other hand, is reserved for evaluating the model's performance. 
+```{r}
+# 80% of dataset is used to form a training set
+logit_train <- logit_df |>
+  sample_frac(size = 0.8, replace = FALSE)
+
+logit_test <- anti_join(logit_df, logit_train)
+```
+
+```{r}
+# Training the model
+model_logit <- logistic_reg() |>
+  set_engine("glm") |>
+  set_mode("classification") |>
+  fit(treatment ~ ., data=logit_train)
+
+predicted_probabilities <- predict(model_logit, new_data = logit_test, type = "prob") |>
+  select(.pred_0, .pred_1)
+```
+
+Just as we needed a cutoff for compound values, we now require a probability cutoff. This is crucial for determining the threshold at which predictions change from 0 to 1, impacting the model's accuracy and the balance between false positives and false negatives. 
+```{r}
+for (cutoff in c(0.3, 0.5, 0.7, 0.9)) {
+  logit_test_res <- logit_test|>
+  mutate(predict = ifelse(predicted_probabilities$.pred_1 > cutoff, 1, 0))
+  
+  SS_res <- logit_test_res |>
+    mutate(state = case_when(treatment == 1 & treatment == predict ~ "TP",
+                           treatment == 1 & treatment != predict ~ "FN",
+                           treatment == 0 & treatment == predict ~ "TN",
+                           treatment == 0 & treatment != predict ~ "FP")) |>
+    group_by(state) |>
+    summarise(number = n())
+  if ("TP" %in% SS_res$state) {
+    TP <- SS_res$number[match("TP", SS_res$state)]
+  } else {
+    TP <- 0
+  }
+  
+  if ("FN" %in% SS_res$state) {
+    FN <- SS_res$number[match("FN", SS_res$state)]
+  } else {
+    FN <- 0
+  }
+  
+  if ("TN" %in% SS_res$state) {
+    TN <- SS_res$number[match("TN", SS_res$state)]
+  } else {
+    TN <- 0
+  }
+  
+  if ("FP" %in% SS_res$state) {
+    FP <- SS_res$number[match("FP", SS_res$state)]
+  } else {
+    FP <- 0
+  }
+  TPR <- TP/(TP+FN)
+  FPR <- 1 - (TN/(TN+FP))
+  distance <- ((1 - TPR)^2 + (FPR - 0)^2)^0.5
+  print(paste(c(cutoff, ": distance: ", as.character(distance), ", TPR: ", as.character(TPR), 
+                ", FPR: ", as.character(FPR)), collapse = ""))
+}
+```
+
+Due to the limited observations in the dataset, it's necessary to perform multiple prediction rounds to calculate the average distance.
+```{r}
+# It'll take a minute or two.
+dis_0.3 <- 0
+dis_0.5 <- 0
+dis_0.7 <- 0
+dis_0.9 <- 0
+  
+for (i in seq(1, 100)) {
+  logit_train <- logit_df |>
+  sample_frac(size = 0.8, replace = FALSE)
+
+  logit_test <- anti_join(logit_df, logit_train)
+  
+  model_logit <- logistic_reg() |>
+    set_engine("glm") |>
+    set_mode("classification") |>
+    fit(treatment ~ ., data=logit_train)
+
+  predicted_probabilities <- predict(model_logit, new_data = logit_test, type = "prob") |>
+    select(.pred_0, .pred_1)
+  
+  for (cutoff in c(0.3, 0.5, 0.7, 0.9)) {
+    logit_test_res <- logit_test|>
+    mutate(predict = ifelse(predicted_probabilities$.pred_1 > cutoff, 1, 0))
+  
+    SS_res <- logit_test_res |>
+    mutate(state = case_when(treatment == 1 & treatment == predict ~ "TP",
+                           treatment == 1 & treatment != predict ~ "FN",
+                           treatment == 0 & treatment == predict ~ "TN",
+                           treatment == 0 & treatment != predict ~ "FP")) |>
+    group_by(state) |>
+    summarise(number = n())
+  if ("TP" %in% SS_res$state) {
+    TP <- SS_res$number[match("TP", SS_res$state)]
+  } else {
+    TP <- 0
+  }
+  
+  if ("FN" %in% SS_res$state) {
+    FN <- SS_res$number[match("FN", SS_res$state)]
+  } else {
+    FN <- 0
+  }
+  
+  if ("TN" %in% SS_res$state) {
+    TN <- SS_res$number[match("TN", SS_res$state)]
+  } else {
+    TN <- 0
+  }
+  
+  if ("FP" %in% SS_res$state) {
+    FP <- SS_res$number[match("FP", SS_res$state)]
+  } else {
+    FP <- 0
+  }
+  TPR <- TP/(TP+FN)
+  FPR <- 1 - (TN/(TN+FP))
+    distance <- ((1 - TPR)^2 + (FPR - 0)^2)^0.5
+    
+    if (cutoff == 0.3) {
+      dis_0.3 <- dis_0.3 + distance
+    } else if (cutoff == 0.5) {
+      dis_0.5 <- dis_0.5 + distance
+    } else if (cutoff == 0.7) {
+      dis_0.7 <- dis_0.7 + distance
+    } else if (cutoff == 0.9) {
+      dis_0.9 <- dis_0.9 + distance
+    }
+  }
+}
+```
+
+```{r}
+# Calculate the average distance
+  dis_0.3_res <- dis_0.3/100
+  dis_0.5_res <- dis_0.5/100
+  dis_0.7_res <- dis_0.7/100
+  dis_0.9_res <- dis_0.9/100
+
+dis_0.3_res
+dis_0.5_res
+dis_0.7_res
+dis_0.9_res
+```
+As observed, with a cutoff set at 0.7, the distance from the ideal classifier is approximately 0.26, though this may vary due to random sampling. Intriguingly, this distance is almost identical to that of OF_cbn.
+
+### Conclusion
+
+In our study, we determined that the optimal threshold values for detecting recent marijuana use are 2.0 for WB_THC (Whole Blood Tetrahydrocannabinol) and 1.0 for OF_CBN (Oral Fluid Cannabinol). Our analysis revealed that OF_CBN stands out as the most effective biomarker when assessing recent marijuana usage, surpassing WB_THC in both sensitivity and specificity. This higher sensitivity of OF_CBN means it is more adept at correctly identifying individuals who have recently used marijuana, minimizing the risk of false negatives. This is crucial in contexts where accurately detecting recent use is vital for ensuring safety, such as in driving under the influence cases. The superior specificity of OF_CBN indicates a lower likelihood of false positives, ensuring that individuals who have not recently used marijuana are less likely to be incorrectly identified as recent users. 
+
+Our extended analysis expands upon our initial work in identifying the most effective biomarkers for recent marijuana usage. Our goal is to develop a logistic regression model that utilizes these two biomarkers to improve the specificity and sensitivity of predictions. On average, the performance of the logistic model shows only a slight improvement compared to using a single biomarker (WB_CBN) for prediction. A significant concern with our logistic model is its instability, primarily due to the limited data available. This underscores the necessity for a more comprehensive and diverse dataset. A larger, more varied dataset would offer a more accurate and consistent insight into the biomarkers' predictive power, thereby improving the model's real-world applicability.
+
+## References 
+
+[^1]: Rebecca L Hartman, Marilyn A Huestis, “Cannabis Effects on Driving Skills”, Clinical Chemistry, Volume 59, Issue 3, 1 March 2013, Pages 478–492, https://doi.org/10.1373/clinchem.2012.194381 
+[^2]: "Results of the 2007 National Roadside Survey of Alcohol and Drug Use by Drivers [Traffic Safety Facts]", 2009, https://doi.org/10.21949/1525704 
+[^3]: Marijuana Legality By State, DISA, 20 October 2023, https://disa.com/marijuana-legality-by-state 
+[^4]: “Cannabis (Marijuana) and Cannabinoids: What You Need To Know”, NIH, 2019, https://www.nccih.nih.gov/health/cannabis-marijuana-and-cannabinoids-what-you-need-to-know
+[^5]: “Marijuana-Impaired Driving: A Report to Congress”, NHTSA, July 2017, https://www.nhtsa.gov/sites/nhtsa.gov/files/documents/812440-marijuana-impaired-driving-report-to-congress.pdf
+[^6]: Mateus M Bergamaschi, Erin L Karschner, Robert S Goodwin, Karl B Scheidweiler, Jussi Hirvonen, Regina HC Queiroz, Marilyn A Huestis, Impact of Prolonged Cannabinoid Excretion in Chronic Daily Cannabis Smokers' Blood on Per Se Drugged Driving Laws, Clinical Chemistry, Volume 59, Issue 3, 1 March 2013, Pages 519–526, https://doi.org/10.1373/clinchem.2012.195503
+[^7]: Thomas R. Arkell, Tory R. Spindle, Richard C. Kevin, Ryan Vandrey & Iain S. McGregor, “The failings of per se limits to detect cannabis-induced driving impairment: Results from a simulated driving study”, Traffic Injury Prevention, 2021, https://doi.org/10.1080/15389588.2020.1851685
+[^8]: Melissa A Hoffman, Jacqueline A Hubbard, Philip M Sobolesky, Breland E Smith, Raymond T Suhandynata, Sandra Sanford, Emily G Sones, Shannon Ellis, Anya Umlauf, Marilyn A Huestis, David J Grelotti, Igor Grant, Thomas D Marcotte, Robert L Fitzgerald, “Blood and Oral Fluid Cannabinoid Profiles of Frequent and Occasional Cannabis Smokers”, Journal of Analytical Toxicology, Volume 45, Issue 8, October 2021, Pages 851–862, https://doi.org/10.1093/jat/bkab078 
