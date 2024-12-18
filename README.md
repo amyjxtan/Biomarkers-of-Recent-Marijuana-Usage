@@ -1,4 +1,7 @@
 # Biomarkers of Recent Marijuana Usage
+Amy Tan, Xuan Jiang, Jiawei Lyu
+
+
 ## Project Overview
 This project investigates improved biomarkers for marijuana use, aiming to identify more accurate and reliable indicators through statistical and computational analyses. By leveraging advanced statistical methods and domain knowledge, this project explores relationships and patterns in data to propose biomarkers that are better suited for identifying marijuana use.
 
