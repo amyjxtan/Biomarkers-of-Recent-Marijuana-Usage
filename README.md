@@ -28,7 +28,7 @@ This project investigates improved biomarkers for marijuana use, aiming to ident
 - Run the code chunks sequentially to replicate the analysis and visualize results.
 
 ## Data
-The data used in this project focuses on potential biomarkers for marijuana use. These include biological and physiological measures collected under controlled conditions. Specific datasets are preprocessed and analyzed within the `.Rmd` file.
+The data used in this project are located in the `data` folder. It was provided as part of the COGS 137 course by [Dr. Shannon Ellis](https://shannon-ellis.com/).
 
 ## Results and Evaluation
 The analysis identifies specific biomarkers showing significant correlation with marijuana use, highlighting their potential for diagnostic purposes. Visualization and statistical summaries are provided in the output, emphasizing:
@@ -41,8 +41,7 @@ The analysis identifies specific biomarkers showing significant correlation with
 - Investigate longitudinal data to assess biomarkers' stability over time.
 
 ## References
-- [Reference 1]: Provide details of academic papers or sources that informed your methodology.
-- [Reference 2]: Include other relevant research or code inspirations.
+- Parts of code adapted from [Dr. Shannon Ellis'](https://shannon-ellis.com/) COGS 137 course - sellis@ucsd.edu 
 
 ## License
 MIT License
